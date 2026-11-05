@@ -687,12 +687,23 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+    if len(sys.argv) == 1:
+        # Запуск без аргументов (двойной клик) — кликабельное меню
         try:
-            input("\n[Enter] — выход")
-        except Exception:
-            pass
+            from proxy_menu import run_menu
+            run_menu()
+        except ImportError as e:
+            print(f"Меню недоступно ({e}) — запускаю обычный скан.\n")
+            try:
+                asyncio.run(main())
+            except KeyboardInterrupt:
+                pass
+            try:
+                input("\n[Enter] — выход")
+            except Exception:
+                pass
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\nStopped.")
