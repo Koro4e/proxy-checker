@@ -1,0 +1,66 @@
+name: proxy-check
+
+on:
+  schedule:
+    # каждые 30 минут (UTC). GitHub может сдвигать запуск на ±15-20 мин
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: proxy-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run proxy check
+        run: python proxy_checker.py --out out --concurrency 400 --top 30
+
+      - name: Copy dashboard to index.html
+        run: cp out/dashboard.html out/index.html
+
+      - name: Commit updated state
+        run: |
+          git config user.name "proxy-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add out/
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            alive=$(jq -r .alive out/proxies_live.json)
+            git commit -m "check $(date -u +%Y-%m-%dT%H:%MZ): alive=$alive"
+            git push
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy-pages:
+    needs: check
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
