@@ -153,6 +153,7 @@ def parse_args():
     p.add_argument("--timeout", type=int, default=8, help="таймаут на прокси в секундах (по умолчанию 8)")
     p.add_argument("--concurrency", type=int, default=300, help="сколько прокси проверять одновременно (по умолчанию 300)")
     p.add_argument("--limit-per-source", type=int, default=0, help="ограничить число прокси с каждого источника (0 = без лимита)")
+    p.add_argument("--skip-dead", type=int, default=0, help="не перепроверять известные мёртвые каждый N-й цикл (0 = проверять всегда)")
     p.add_argument("--top", type=int, default=25, help="сколько лучших показать в консоли (по умолчанию 25)")
     p.add_argument("--loop", type=int, default=0, help="повторять цикл каждые N минут (0 = один прогон)")
     p.add_argument("--serve", type=int, default=0, help="поднять веб-интерфейс на 127.0.0.1:PORT (0 = выключено)")
@@ -219,8 +220,10 @@ async def load_proxies(session: aiohttp.ClientSession, sources: list, args) -> d
             added += 1
         return added
 
-    for src in sources:
-        text = await fetch_text(session, src["url"])
+    async def grab(src):
+        return src, await fetch_text(session, src["url"])
+
+    for src, text in await asyncio.gather(*[grab(s) for s in sources]):
         if text is None:
             continue
         n = feed(src["name"], src.get("proto"), text)
@@ -539,7 +542,7 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     # Дифф с хранилищем: новые добавляем, исчезнувшие удаляем
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     current_keys = {store_key(p.proto, p.host, p.port) for p in bag.values()}
-    store_keys = set(store.keys())
+    store_keys = {k for k in store if not k.startswith("_")}
     added = sorted(current_keys - store_keys)
     removed = sorted(store_keys - current_keys)
     first_run = not store_keys
@@ -559,8 +562,28 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     if removed:
         print("      sample removed: " + ", ".join(removed[:5]) + ("..." if len(removed) > 5 else ""))
 
+    # Счётчик циклов в хранилище (для --skip-dead)
+    meta = store.setdefault("_meta", {"cycle": 0})
+    meta["cycle"] = int(meta.get("cycle", 0)) + 1
+    cycle_no = int(meta["cycle"])
+
     proxies = list(bag.values())
-    print(f"[3/4] Checking (concurrency {args.concurrency}, timeout {args.timeout}s)...")
+    # Инкрементальный режим: известные мёртвые перепроверяются каждый N-й цикл,
+    # живые и новые — каждый. Живых мало, поэтому обычный цикл короткий.
+    skipped_dead = 0
+    if args.skip_dead > 0 and cycle_no % args.skip_dead != 0:
+        filtered = []
+        for p in proxies:
+            e = store.get(store_key(p.proto, p.host, p.port))
+            last = (e or {}).get("last")
+            if last and last.get("alive") is False:
+                skipped_dead += 1
+                continue
+            filtered.append(p)
+        proxies = filtered
+
+    print(f"[3/4] Checking (concurrency {args.concurrency}, timeout {args.timeout}s, cycle {cycle_no}" +
+          (f", skip-dead: пропущено {skipped_dead} мёртвых)" if skipped_dead else ")"))
     my_ip = await get_own_ip(session)
     sem = asyncio.Semaphore(args.concurrency)
     stats = {"done": 0, "alive": 0}
@@ -572,7 +595,8 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
                      "checked_at": now_iso}
 
     live = sorted([r for r in results if r.alive], key=lambda r: (r.latency_ms or 10**9))
-    print(f"[4/4] Alive: {len(live)} of {len(results)}")
+    print(f"[4/4] Alive: {len(live)} of {len(results)} checked" +
+          (f" (dead skipped: {skipped_dead})" if skipped_dead else ""))
     by_proto = {}
     for r in live:
         by_proto[r.proto] = by_proto.get(r.proto, 0) + 1
@@ -582,9 +606,10 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     csv_path, json_path = write_outputs(results, Path(args.out))
     dash_path = build_dashboard(Path(args.out), live, len(results), delta,
                                 len(store), now_iso)
-    append_changes(Path(args.out), {"ts": now_iso, "added": delta["added"],
-                                    "removed": delta["removed"],
-                                    "alive": len(live), "checked": len(results)})
+    append_changes(Path(args.out), {"ts": now_iso, "cycle": cycle_no,
+                                    "added": delta["added"], "removed": delta["removed"],
+                                    "alive": len(live), "checked": len(results),
+                                    "skipped_dead": skipped_dead})
     save_store(Path(args.out), store)
     print(f"      results: {csv_path}")
     print(f"               {json_path}")
@@ -605,8 +630,9 @@ async def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     store = load_store(out_dir)
-    if store:
-        print(f"Хранилище: {len(store)} прокси с прошлого прогона")
+    tracked = len([k for k in store if not k.startswith("_")])
+    if tracked:
+        print(f"Хранилище: {tracked} прокси с прошлого прогона")
 
     # Windows Proactor шумит ConnectionResetError от мёртвых прокси — глушим только его.
     loop = asyncio.get_running_loop()
