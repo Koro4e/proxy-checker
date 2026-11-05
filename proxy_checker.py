@@ -78,7 +78,7 @@ DEFAULT_SOURCES = [
     {"name": "ProxyScrape http",            "url": "https://cdn.jsdelivr.net/gh/ProxyScrape/free-proxy-list@main/proxies/protocols/http/data.txt", "proto": None},
     {"name": "ProxyScrape socks4",          "url": "https://cdn.jsdelivr.net/gh/ProxyScrape/free-proxy-list@main/proxies/protocols/socks4/data.txt", "proto": None},
     {"name": "ProxyScrape socks5",          "url": "https://cdn.jsdelivr.net/gh/ProxyScrape/free-proxy-list@main/proxies/protocols/socks5/data.txt", "proto": None},
-    {"name": "rix4uni fresh proxylist",     "url": "https://raw.githubusercontent.com/rix4uni/fresh-proxy-list/main/proxylist.txt", "proto": None},
+    {"name": "rix4uni fresh proxylist",     "url": "https://raw.githubusercontent.com/rix4uni/fresh-proxy-list/main/proxylist.txt", "proto": None, "stride": 10},
 ]
 
 GEO_JUDGE = "http://ip-api.com/json/?fields=status,message,country,countryCode,city,isp,org,as,query,proxy,hosting&lang=ru"
@@ -196,12 +196,12 @@ def valid_ip(host: str) -> bool:
 async def load_proxies(session: aiohttp.ClientSession, sources: list, args) -> dict:
     bag: dict = {}
 
-    def feed(name: str, proto_default: str | None, text: str) -> int:
+    def feed(name: str, proto_default: str | None, text: str, stride: int = 1) -> int:
         added = 0
         for idx, raw in enumerate(text.splitlines()):
             if args.limit_per_source and added >= args.limit_per_source:
                 break
-            if args.stride > 1 and idx % args.stride != 0:
+            if stride > 1 and idx % stride != 0:
                 continue
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -236,7 +236,8 @@ async def load_proxies(session: aiohttp.ClientSession, sources: list, args) -> d
     for src, text in await asyncio.gather(*[grab(s) for s in sources]):
         if text is None:
             continue
-        n = feed(src["name"], src.get("proto"), text)
+        stride = max(args.stride, int(src.get("stride", 1)))
+        n = feed(src["name"], src.get("proto"), text, stride)
         print(f"  [+] {src['name']}: {n} entries")
     return bag
 
@@ -255,13 +256,13 @@ async def get_own_ip(session: aiohttp.ClientSession) -> str | None:
         return None
 
 
-async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict, resolver=None) -> CheckResult:
+async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict) -> CheckResult:
     res = CheckResult(proto=p.proto, host=p.host, port=p.port, sources=";".join(sorted(p.sources)))
     async with sem:
         connector = ProxyConnector.from_url(f"{p.proto}://{p.host}:{p.port}")
         try:
             timeout = aiohttp.ClientTimeout(total=args.timeout, connect=args.timeout)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout, resolver=resolver) as s:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as s:
                 # 1. Гео + latency через прокси
                 t0 = time.perf_counter()
                 async with s.get(GEO_JUDGE) as r:
@@ -595,13 +596,9 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     print(f"[3/4] Checking (concurrency {args.concurrency}, timeout {args.timeout}s, cycle {cycle_no}" +
           (f", skip-dead: пропущено {skipped_dead} мёртвых)" if skipped_dead else ")"))
     my_ip = await get_own_ip(session)
-    try:
-        resolver = aiohttp.AsyncResolver()  # c-ares: DNS в event loop, а не в тред-пуле
-    except Exception:
-        resolver = None
     sem = asyncio.Semaphore(args.concurrency)
     stats = {"done": 0, "alive": 0}
-    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats, resolver) for p in proxies])
+    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats) for p in proxies])
 
     for r in results:
         e = store[store_key(r.proto, r.host, r.port)]
