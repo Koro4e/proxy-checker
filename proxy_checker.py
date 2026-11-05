@@ -154,6 +154,7 @@ def parse_args():
     p.add_argument("--concurrency", type=int, default=300, help="сколько прокси проверять одновременно (по умолчанию 300)")
     p.add_argument("--limit-per-source", type=int, default=0, help="ограничить число прокси с каждого источника (0 = без лимита)")
     p.add_argument("--skip-dead", type=int, default=0, help="не перепроверять известные мёртвые каждый N-й цикл (0 = проверять всегда)")
+    p.add_argument("--fast-judges", type=int, default=0, help="judges (https/anon) только для прокси быстрее N мс (0 = для всех)")
     p.add_argument("--top", type=int, default=25, help="сколько лучших показать в консоли (по умолчанию 25)")
     p.add_argument("--loop", type=int, default=0, help="повторять цикл каждые N минут (0 = один прогон)")
     p.add_argument("--serve", type=int, default=0, help="поднять веб-интерфейс на 127.0.0.1:PORT (0 = выключено)")
@@ -245,13 +246,13 @@ async def get_own_ip(session: aiohttp.ClientSession) -> str | None:
         return None
 
 
-async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict) -> CheckResult:
+async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict, resolver=None) -> CheckResult:
     res = CheckResult(proto=p.proto, host=p.host, port=p.port, sources=";".join(sorted(p.sources)))
     async with sem:
         connector = ProxyConnector.from_url(f"{p.proto}://{p.host}:{p.port}")
         try:
             timeout = aiohttp.ClientTimeout(total=args.timeout, connect=args.timeout)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as s:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout, resolver=resolver) as s:
                 # 1. Гео + latency через прокси
                 t0 = time.perf_counter()
                 async with s.get(GEO_JUDGE) as r:
@@ -267,8 +268,8 @@ async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None,
                 res.isp = (data.get("isp") or data.get("org") or "")[:80]
                 res.hosting = data.get("hosting")
 
-                # 2. HTTPS-туннель (CONNECT)
-                if not args.no_connect_test:
+                # 2. HTTPS-туннель (CONNECT) — на медленных пропускаем в fast-режиме
+                if not args.no_connect_test and (args.fast_judges <= 0 or (res.latency_ms or 10**9) <= args.fast_judges):
                     try:
                         t1 = time.perf_counter()
                         async with s.get(CONNECT_JUDGE) as r:
@@ -277,8 +278,8 @@ async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None,
                     except Exception:
                         res.https_ok = False
 
-                # 3. Уровень анонимности по эху заголовков
-                if not args.no_anon:
+                # 3. Уровень анонимности по эху заголовков — тоже только для быстрых
+                if not args.no_anon and (args.fast_judges <= 0 or (res.latency_ms or 10**9) <= args.fast_judges):
                     try:
                         async with s.get(ANON_JUDGE) as r:
                             j = await r.json(content_type=None)
@@ -585,9 +586,13 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     print(f"[3/4] Checking (concurrency {args.concurrency}, timeout {args.timeout}s, cycle {cycle_no}" +
           (f", skip-dead: пропущено {skipped_dead} мёртвых)" if skipped_dead else ")"))
     my_ip = await get_own_ip(session)
+    try:
+        resolver = aiohttp.AsyncResolver()  # c-ares: DNS в event loop, а не в тред-пуле
+    except Exception:
+        resolver = None
     sem = asyncio.Semaphore(args.concurrency)
     stats = {"done": 0, "alive": 0}
-    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats) for p in proxies])
+    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats, resolver) for p in proxies])
 
     for r in results:
         e = store[store_key(r.proto, r.host, r.port)]
