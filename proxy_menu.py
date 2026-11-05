@@ -8,6 +8,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,9 +55,9 @@ class MenuApp(App):
             yield Button("✕ Выход", id="b-quit", variant="default")
         with Horizontal(id="opts"):
             yield Static("потоки:")
-            yield Input(value="400", id="i-conc")
+            yield Input(value="500", id="i-conc")
             yield Static("таймаут, с:")
-            yield Input(value="6", id="i-time")
+            yield Input(value="5", id="i-time")
             yield Static("цикл, мин:")
             yield Input(value="30", id="i-loop")
         yield ProgressBar(id="prog", show_eta=False)
@@ -71,8 +72,64 @@ class MenuApp(App):
         table.cursor_type = "row"
         self.proc = None
         self._mtime = 0.0
+        self.http_port = None
+        self._start_http()
         self.set_interval(3.0, self.refresh_table)
         self.refresh_table()
+
+    def _start_http(self) -> None:
+        """Мини-сервер для дашборда: по http страница живёт в реальном времени."""
+        import functools
+        import http.server
+        import socketserver
+        import threading
+        try:
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+        for port in range(8619, 8631):
+            try:
+                handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(OUT_DIR))
+                socketserver.ThreadingTCPServer.allow_reuse_address = True
+                httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), handler)
+                threading.Thread(target=httpd.serve_forever, daemon=True).start()
+                self.http_port = port
+                return
+            except OSError:
+                continue
+
+    def _copy(self, text: str) -> bool:
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+            return True
+        except Exception:
+            pass
+        try:
+            fn = getattr(self, "copy_to_clipboard", None)
+            if fn:
+                fn(text)
+                return True
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                subprocess.run(["clip"], input=text.encode("utf-16-le"), check=False)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def on_data_table_row_selected(self, event) -> None:
+        """Клик (или Enter) по строке таблицы — копирует proto://адрес в буфер."""
+        try:
+            vals = self.query_one("#table", DataTable).get_row(event.row)
+            text = f"{vals[0]}://{vals[1]}"
+            ok = self._copy(text)
+            self.notify(f"Скопировано: {text}" if ok else "Не удалось скопировать",
+                        severity="information" if ok else "error")
+        except Exception:
+            pass
 
     # ---------- helpers ----------
 
@@ -157,10 +214,12 @@ class MenuApp(App):
                 self.notify("Нечего останавливать", severity="warning")
         elif bid == "b-dash":
             p = OUT_DIR / "dashboard.html"
-            if p.exists():
-                os.startfile(str(p))
-            else:
+            if not p.exists():
                 self.notify("Дашборда ещё нет — запусти скан", severity="warning")
+            elif self.http_port:
+                os.startfile(f"http://127.0.0.1:{self.http_port}/dashboard.html")
+            else:
+                os.startfile(str(p))
         elif bid == "b-folder":
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             os.startfile(str(OUT_DIR))

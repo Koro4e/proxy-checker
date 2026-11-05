@@ -256,7 +256,7 @@ async def get_own_ip(session: aiohttp.ClientSession) -> str | None:
         return None
 
 
-async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict) -> CheckResult:
+async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None, stats: dict, alive_sink: list | None = None) -> CheckResult:
     res = CheckResult(proto=p.proto, host=p.host, port=p.port, sources=";".join(sorted(p.sources)))
     async with sem:
         connector = ProxyConnector.from_url(f"{p.proto}://{p.host}:{p.port}")
@@ -303,6 +303,8 @@ async def check_proxy(sem: asyncio.Semaphore, p: Proxy, args, my_ip: str | None,
                             res.anon = "anonymous"
                     except Exception:
                         res.anon = "n/a"
+                if alive_sink is not None:
+                    alive_sink.append(res)
         except Exception as e:
             msg = str(e)
             res.error = (type(e).__name__ + (f": {msg[:70]}" if msg else ""))[:100]
@@ -323,7 +325,7 @@ DASHBOARD_TEMPLATE = r"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="300">
+<meta http-equiv="refresh" content="20">
 <title>Proxy Dashboard</title>
 <style>
   :root { color-scheme: dark; }
@@ -354,20 +356,23 @@ DASHBOARD_TEMPLATE = r"""<!doctype html>
   .elite { color:#5fd08a; } .anonymous { color:#e8c46a; } .transparent { color:#e86a7a; }
   .dc { color:#e86a7a; } .resid { color:#5fd08a; }
   .src { color:#6b7280; max-width:260px; overflow:hidden; text-overflow:ellipsis; }
+  #tb tr { cursor: pointer; }
+  #toast { position:fixed; bottom:14px; right:14px; background:#1d2633; color:#dbe6ff; border:1px solid #3d5388; border-radius:8px; padding:8px 14px; font-size:12px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:50; max-width:420px; }
+  #toast.show { opacity:1; }
   @media (max-width: 800px){ .card{min-width:90px} input[type=text]{width:140px} }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Proxy Dashboard</h1>
-  <div class="sub">обновлено: __GENERATED__ &middot; страница сама перечитывается каждые 5 мин &middot; данные: out/proxies_live.json</div>
+  <div class="sub" id="subline">обновлено: __GENERATED__ &middot; <span id="phase-note">__PHASE_NOTE__</span> &middot; клик по строке — копирует прокси</div>
 
   <div class="cards">
-    <div class="card"><div class="v ok">__ALIVE__</div><div class="l">живых</div></div>
-    <div class="card"><div class="v">__CHECKED__</div><div class="l">проверено</div></div>
-    <div class="card"><div class="v add">+__ADDED__</div><div class="l">новых в списках</div></div>
-    <div class="card"><div class="v rem">-__REMOVED__</div><div class="l">исчезло из списков</div></div>
-    <div class="card"><div class="v">__TRACKED__</div><div class="l">в хранилище</div></div>
+    <div class="card"><div class="v ok" id="v-alive">__ALIVE__</div><div class="l">живых</div></div>
+    <div class="card"><div class="v" id="v-checked">__CHECKED__</div><div class="l">проверено</div></div>
+    <div class="card"><div class="v add" id="v-added">+__ADDED__</div><div class="l">новых в списках</div></div>
+    <div class="card"><div class="v rem" id="v-removed">-__REMOVED__</div><div class="l">исчезло из списков</div></div>
+    <div class="card"><div class="v" id="v-tracked">__TRACKED__</div><div class="l">в хранилище</div></div>
   </div>
 
   <div class="bar">
@@ -394,7 +399,6 @@ DASHBOARD_TEMPLATE = r"""<!doctype html>
 <script>
 const DATA = __DATA__;
 let sortKey = "latency_ms", sortDir = 1;
-
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const addr = r => r.host + ":" + r.port;
 const getVal = (r,k) => k==="addr" ? addr(r) : (r[k] ?? "");
@@ -462,10 +466,64 @@ document.querySelectorAll("th[data-k]").forEach(th => th.addEventListener("click
 document.getElementById("fSearch").addEventListener("input", render);
 document.getElementById("btnCopy").addEventListener("click", () => {
   const txt = DATA.proxies.map(r => r.proto + "://" + addr(r)).join("\n");
-  navigator.clipboard.writeText(txt).then(
-    () => { document.getElementById("btnCopy").textContent = "Скопировано!"; setTimeout(()=>document.getElementById("btnCopy").textContent="Copy ip:port", 1500); },
-    () => { document.getElementById("btnCopy").textContent = "Ошибка"; });
+  copyText(txt, ok => {
+    document.getElementById("btnCopy").textContent = ok ? "Скопировано!" : "Ошибка";
+    setTimeout(() => document.getElementById("btnCopy").textContent = "Copy ip:port", 1500);
+  });
 });
+
+// клик по строке — копировать этот прокси
+ document.getElementById("tb").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr"); if (!tr) return;
+  const c = tr.children; if (c.length < 2) return;
+  const text = c[0].textContent + "://" + c[1].textContent;
+  copyText(text, ok => toast(ok ? "Скопировано: " + text : "Не удалось скопировать"));
+});
+
+function copyText(t, cb){
+  const fallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand("copy"); ta.remove(); cb(ok);
+    } catch (e) { cb(false); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(t).then(() => cb(true), () => fallback());
+  else fallback();
+}
+
+let toastTimer = null;
+function toast(msg){
+  let el = document.getElementById("toast");
+  if (!el) { el = document.createElement("div"); el.id = "toast"; document.body.appendChild(el); }
+  el.textContent = msg; el.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("show"), 1600);
+}
+
+// реальное время: по http опрашиваем снапшот каждые 5 с; по file:// перечитываем страницу сами (meta refresh)
+if (location.protocol.indexOf("http") === 0) {
+  setInterval(async () => {
+    try {
+      const r = await fetch("proxies_live.json?ts=" + Date.now(), {cache: "no-store"});
+      if (r.ok) applyData(await r.json());
+    } catch (e) {}
+  }, 5000);
+}
+
+function applyData(d){
+  DATA = d;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set("v-alive", d.proxies.length);
+  set("v-checked", d.checked ?? d.total_checked ?? 0);
+  set("v-added", "+" + (d.added ?? 0));
+  set("v-removed", "-" + (d.removed ?? 0));
+  set("v-tracked", d.tracked ?? 0);
+  const pn = document.getElementById("phase-note");
+  if (pn) pn.textContent = d.phase === "live" ? "⚠ скан идёт — обновление каждые 5 с" : "скан завершён";
+  render();
+}
 
 render();
 </script>
@@ -475,7 +533,7 @@ render();
 
 
 def build_dashboard(out_dir: Path, live: list, total_checked: int, delta: dict,
-                    tracked: int, generated_at: str) -> Path:
+                    tracked: int, generated_at: str, phase: str = "final") -> Path:
     data = {"generated_at": generated_at, "proxies": [
         {"proto": r.proto, "host": r.host, "port": r.port, "latency_ms": r.latency_ms,
          "cc": r.cc, "city": r.city, "country": r.country, "isp": r.isp,
@@ -489,6 +547,9 @@ def build_dashboard(out_dir: Path, live: list, total_checked: int, delta: dict,
             .replace("__ADDED__", str(delta.get("added", 0)))
             .replace("__REMOVED__", str(delta.get("removed", 0)))
             .replace("__TRACKED__", str(tracked)))
+    html = html.replace("__PHASE_NOTE__",
+                        "⚠ скан идёт прямо сейчас — данные обновляются каждые 5 с" if phase == "live"
+                        else "страница сама перечитывается каждые 20 с")
     path = out_dir / "dashboard.html"
     path.write_text(html, encoding="utf-8")
     return path
@@ -498,7 +559,20 @@ def build_dashboard(out_dir: Path, live: list, total_checked: int, delta: dict,
 # Выводы
 # ----------------------------------------------------------------------------
 
-def write_outputs(results: list, out_dir: Path):
+def write_live_snapshot(out_dir: Path, live_sorted: list, done: int, planned: int,
+                        delta: dict, tracked: int) -> None:
+    payload = {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               "phase": "live", "checked": done, "planned": planned,
+               "added": delta.get("added", 0), "removed": delta.get("removed", 0),
+               "tracked": tracked, "total_checked": done, "alive": len(live_sorted),
+               "proxies": [asdict(r) for r in live_sorted]}
+    (out_dir / "proxies_live.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    build_dashboard(out_dir, live_sorted, done, delta, tracked,
+                    payload["generated_at"], phase="live")
+
+
+def write_outputs(results: list, out_dir: Path, delta: dict | None = None, tracked: int = 0):
     out_dir.mkdir(parents=True, exist_ok=True)
     live = [r for r in results if r.alive]
     live.sort(key=lambda r: (r.latency_ms or 10**9))
@@ -515,6 +589,11 @@ def write_outputs(results: list, out_dir: Path):
     json_path = out_dir / "proxies_live.json"
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "phase": "final",
+        "checked": len(results),
+        "added": (delta or {}).get("added", 0),
+        "removed": (delta or {}).get("removed", 0),
+        "tracked": tracked,
         "total_checked": len(results),
         "alive": len(live),
         "proxies": [asdict(r) for r in live],
@@ -598,7 +677,27 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     my_ip = await get_own_ip(session)
     sem = asyncio.Semaphore(args.concurrency)
     stats = {"done": 0, "alive": 0}
-    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats) for p in proxies])
+    alive_sink: list = []
+    planned = len(proxies)
+    tracked_now = len([k for k in store if not k.startswith("_")])
+
+    async def live_writer():
+        # Снапшот каждые 5 с: уже найденные живые + прогресс — дашборд в реальном времени
+        try:
+            while stats["done"] < planned:
+                await asyncio.sleep(5)
+                if not alive_sink:
+                    continue
+                live_sorted = sorted(alive_sink, key=lambda r: (r.latency_ms or 10**9))
+                write_live_snapshot(Path(args.out), live_sorted, stats["done"], planned,
+                                    delta, tracked_now)
+        except asyncio.CancelledError:
+            pass
+
+    live_task = asyncio.create_task(live_writer()) if planned else None
+    results = await asyncio.gather(*[check_proxy(sem, p, args, my_ip, stats, alive_sink) for p in proxies])
+    if live_task:
+        live_task.cancel()
 
     for r in results:
         e = store[store_key(r.proto, r.host, r.port)]
@@ -614,7 +713,7 @@ async def run_cycle(args, session: aiohttp.ClientSession, store: dict) -> list:
     for proto, n in sorted(by_proto.items()):
         print(f"      {proto}: {n}")
 
-    csv_path, json_path = write_outputs(results, Path(args.out))
+    csv_path, json_path = write_outputs(results, Path(args.out), delta, tracked_now)
     dash_path = build_dashboard(Path(args.out), live, len(results), delta,
                                 len(store), now_iso)
     append_changes(Path(args.out), {"ts": now_iso, "cycle": cycle_no,
