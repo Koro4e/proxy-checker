@@ -33,7 +33,7 @@ jobs:
       - name: Run proxy check
         run: |
           ulimit -n 8192
-          python proxy_checker.py --out out --concurrency 1000 --timeout 6 --skip-dead 3 --fast-judges 3000 --top 30
+          python proxy_checker.py --out out --concurrency 1000 --timeout 5 --skip-dead 3 --fast-judges 3000 --top 30
 
       - name: Copy dashboard to index.html
         run: cp out/dashboard.html out/index.html
