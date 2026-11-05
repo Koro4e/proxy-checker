@@ -43,6 +43,12 @@ try:
 except Exception:
     pass
 
+# В замороженном exe рабочая папка — рядом с exe, а не во временной распаковке
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
@@ -153,12 +159,13 @@ def parse_args():
     p.add_argument("--timeout", type=int, default=8, help="таймаут на прокси в секундах (по умолчанию 8)")
     p.add_argument("--concurrency", type=int, default=300, help="сколько прокси проверять одновременно (по умолчанию 300)")
     p.add_argument("--limit-per-source", type=int, default=0, help="ограничить число прокси с каждого источника (0 = без лимита)")
+    p.add_argument("--stride", type=int, default=1, help="брать каждую N-ю строку списка — для честной выборки вместо головы (1 = все)")
     p.add_argument("--skip-dead", type=int, default=0, help="не перепроверять известные мёртвые каждый N-й цикл (0 = проверять всегда)")
     p.add_argument("--fast-judges", type=int, default=0, help="judges (https/anon) только для прокси быстрее N мс (0 = для всех)")
     p.add_argument("--top", type=int, default=25, help="сколько лучших показать в консоли (по умолчанию 25)")
     p.add_argument("--loop", type=int, default=0, help="повторять цикл каждые N минут (0 = один прогон)")
     p.add_argument("--serve", type=int, default=0, help="поднять веб-интерфейс на 127.0.0.1:PORT (0 = выключено)")
-    p.add_argument("--out", default=str(Path(__file__).resolve().parent / "out"), help="папка для результатов")
+    p.add_argument("--out", default=str(BASE_DIR / "out"), help="папка для результатов")
     p.add_argument("--no-anon", action="store_true", help="не определять уровень анонимности (быстрее)")
     p.add_argument("--no-connect-test", action="store_true", help="не тестировать HTTPS-туннель (CONNECT)")
     p.add_argument("--sources-json", default=None, help='JSON-файл с доп. источниками: [{"name","url","proto"}]')
@@ -191,9 +198,11 @@ async def load_proxies(session: aiohttp.ClientSession, sources: list, args) -> d
 
     def feed(name: str, proto_default: str | None, text: str) -> int:
         added = 0
-        for raw in text.splitlines():
+        for idx, raw in enumerate(text.splitlines()):
             if args.limit_per_source and added >= args.limit_per_source:
                 break
+            if args.stride > 1 and idx % args.stride != 0:
+                continue
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
@@ -685,3 +694,8 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nStopped.")
+    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        try:
+            input("\n[Enter] — выход")
+        except Exception:
+            pass
