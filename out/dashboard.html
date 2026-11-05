@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="300">
+<title>Proxy Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0d0f13; color:#d7dae0; font:13px/1.45 ui-monospace,Consolas,Menlo,monospace; }
+  .wrap { max-width:1400px; margin:0 auto; padding:20px; }
+  h1 { font-size:18px; margin:0 0 2px; }
+  .sub { color:#7d8490; font-size:11px; margin-bottom:16px; }
+  .cards { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
+  .card { background:#151922; border:1px solid #242a36; border-radius:8px; padding:10px 16px; min-width:110px; }
+  .card .v { font-size:22px; font-weight:700; }
+  .card .l { font-size:10px; color:#7d8490; text-transform:uppercase; letter-spacing:.08em; }
+  .v.ok { color:#5fd08a; } .v.add { color:#6ac8e8; } .v.rem { color:#e86a7a; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  select, input[type=text] { background:#151922; color:#d7dae0; border:1px solid #2a3140; border-radius:6px; padding:5px 8px; font:inherit; }
+  input[type=text] { width:210px; }
+  label.chk { display:flex; gap:5px; align-items:center; color:#9aa1ad; cursor:pointer; }
+  button { background:#2b3b5e; color:#dbe6ff; border:1px solid #3d5388; border-radius:6px; padding:5px 12px; font:inherit; cursor:pointer; }
+  button:hover { background:#35497a; }
+  .cnt { margin-left:auto; color:#7d8490; font-size:11px; }
+  table { width:100%; border-collapse:collapse; background:#10141b; border:1px solid #1f2530; border-radius:8px; overflow:hidden; }
+  th { position:sticky; top:0; background:#171c26; color:#8f97a5; font-size:10px; text-transform:uppercase; letter-spacing:.07em; text-align:left; padding:8px 10px; cursor:pointer; user-select:none; white-space:nowrap; }
+  th:hover { color:#d7dae0; }
+  th.sorted { color:#e8c46a; }
+  td { padding:6px 10px; border-top:1px solid #1a2029; white-space:nowrap; }
+  tr:hover td { background:#151b25; }
+  .ms-fast { color:#5fd08a; font-weight:700; } .ms-mid { color:#e8c46a; } .ms-slow { color:#e86a7a; }
+  .elite { color:#5fd08a; } .anonymous { color:#e8c46a; } .transparent { color:#e86a7a; }
+  .dc { color:#e86a7a; } .resid { color:#5fd08a; }
+  .src { color:#6b7280; max-width:260px; overflow:hidden; text-overflow:ellipsis; }
+  @media (max-width: 800px){ .card{min-width:90px} input[type=text]{width:140px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Proxy Dashboard</h1>
+  <div class="sub">обновлено: 2026-11-05T13:09:43+00:00 &middot; страница сама перечитывается каждые 5 мин &middot; данные: out/proxies_live.json</div>
+
+  <div class="cards">
+    <div class="card"><div class="v ok">0</div><div class="l">живых</div></div>
+    <div class="card"><div class="v">312794</div><div class="l">проверено</div></div>
+    <div class="card"><div class="v add">+0</div><div class="l">новых в списках</div></div>
+    <div class="card"><div class="v rem">-0</div><div class="l">исчезло из списков</div></div>
+    <div class="card"><div class="v">312795</div><div class="l">в хранилище</div></div>
+  </div>
+
+  <div class="bar">
+    <select id="fProto"><option value="">протокол: все</option><option>http</option><option>socks4</option><option>socks5</option></select>
+    <select id="fCC"><option value="">страна: все</option></select>
+    <select id="fAnon"><option value="">anon: все</option><option>elite</option><option>anonymous</option><option>transparent</option><option>n/a</option></select>
+    <label class="chk"><input type="checkbox" id="fHttps"> только HTTPS</label>
+    <label class="chk"><input type="checkbox" id="fResid"> не датацентр</label>
+    <input type="text" id="fSearch" placeholder="поиск: IP / город / ISP...">
+    <button id="btnCopy">Copy ip:port</button>
+    <span class="cnt" id="cnt"></span>
+  </div>
+
+  <table id="t">
+    <thead><tr>
+      <th data-k="proto">proto</th><th data-k="addr">address</th><th data-k="latency_ms">ms</th>
+      <th data-k="cc">cc</th><th data-k="city">city</th><th data-k="isp">ISP</th>
+      <th data-k="hosting">тип</th><th data-k="https_ok">https</th><th data-k="anon">anon</th><th class="src">sources</th>
+    </tr></thead>
+    <tbody id="tb"></tbody>
+  </table>
+</div>
+
+<script>
+const DATA = {"generated_at": "2026-11-05T13:09:43+00:00", "proxies": []};
+let sortKey = "latency_ms", sortDir = 1;
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const addr = r => r.host + ":" + r.port;
+const getVal = (r,k) => k==="addr" ? addr(r) : (r[k] ?? "");
+
+function render(){
+  const fp = document.getElementById("fProto").value;
+  const fc = document.getElementById("fCC").value;
+  const fa = document.getElementById("fAnon").value;
+  const fh = document.getElementById("fHttps").checked;
+  const fr = document.getElementById("fResid").checked;
+  const q  = document.getElementById("fSearch").value.trim().toLowerCase();
+
+  let rows = DATA.proxies.filter(r =>
+    (!fp || r.proto === fp) &&
+    (!fc || r.cc === fc) &&
+    (!fa || r.anon === fa) &&
+    (!fh || r.https_ok === true) &&
+    (!fr || r.hosting === false) &&
+    (!q || (addr(r)+" "+(r.city||"")+" "+(r.isp||"")+" "+(r.country||"")).toLowerCase().includes(q))
+  );
+  rows.sort((a,b) => {
+    const va = getVal(a,sortKey), vb = getVal(b,sortKey);
+    if (typeof va === "number" || typeof vb === "number") return ((va??1e9) - (vb??1e9)) * sortDir;
+    return String(va).localeCompare(String(vb)) * sortDir;
+  });
+
+  const tb = document.getElementById("tb");
+  tb.innerHTML = rows.map(r => {
+    const ms = r.latency_ms;
+    const msCls = ms < 300 ? "ms-fast" : ms < 1000 ? "ms-mid" : "ms-slow";
+    const typeCls = r.hosting ? "dc" : "resid";
+    const typeTxt = r.hosting ? "DC" : "resid";
+    return "<tr>" +
+      "<td>" + esc(r.proto) + "</td>" +
+      "<td>" + esc(addr(r)) + "</td>" +
+      "<td class='" + msCls + "'>" + (ms ?? "?") + "</td>" +
+      "<td>" + esc(r.cc || "??") + "</td>" +
+      "<td>" + esc(r.city || "") + "</td>" +
+      "<td>" + esc(r.isp || "") + "</td>" +
+      "<td class='" + typeCls + "'>" + typeTxt + "</td>" +
+      "<td>" + (r.https_ok ? "да" : "нет") + "</td>" +
+      "<td class='" + esc(r.anon) + "'>" + esc(r.anon) + "</td>" +
+      "<td class='src' title='" + esc(r.sources) + "'>" + esc(r.sources) + "</td>" +
+    "</tr>";
+  }).join("");
+  document.getElementById("cnt").textContent = "показано " + rows.length + " из " + DATA.proxies.length;
+}
+
+// страны в селектор — по убыванию количества
+const ccCount = {};
+DATA.proxies.forEach(r => { if (r.cc) ccCount[r.cc] = (ccCount[r.cc]||0)+1; });
+Object.entries(ccCount).sort((a,b)=>b[1]-a[1]).forEach(([cc]) => {
+  const o = document.createElement("option"); o.textContent = cc; document.getElementById("fCC").appendChild(o);
+});
+
+document.querySelectorAll("th[data-k]").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k;
+  if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+  document.querySelectorAll("th").forEach(x => x.classList.remove("sorted"));
+  th.classList.add("sorted");
+  render();
+}));
+["fProto","fCC","fAnon"].forEach(id => document.getElementById(id).addEventListener("change", render));
+["fHttps","fResid"].forEach(id => document.getElementById(id).addEventListener("change", render));
+document.getElementById("fSearch").addEventListener("input", render);
+document.getElementById("btnCopy").addEventListener("click", () => {
+  const txt = DATA.proxies.map(r => r.proto + "://" + addr(r)).join("\n");
+  navigator.clipboard.writeText(txt).then(
+    () => { document.getElementById("btnCopy").textContent = "Скопировано!"; setTimeout(()=>document.getElementById("btnCopy").textContent="Copy ip:port", 1500); },
+    () => { document.getElementById("btnCopy").textContent = "Ошибка"; });
+});
+
+render();
+</script>
+</body>
+</html>
