@@ -22,3 +22,4 @@
 {"ts": "2026-11-09T20:57:15+00:00", "cycle": 22, "added": 32512, "removed": 33929, "alive": 1040, "checked": 33260, "skipped_dead": 13073}
 {"ts": "2026-11-10T03:05:54+00:00", "cycle": 23, "added": 33527, "removed": 34096, "alive": 972, "checked": 34142, "skipped_dead": 11622}
 {"ts": "2026-11-10T11:26:58+00:00", "cycle": 24, "added": 27098, "removed": 26300, "alive": 1563, "checked": 46562, "skipped_dead": 0}
+{"ts": "2026-11-10T18:44:29+00:00", "cycle": 25, "added": 26733, "removed": 31206, "alive": 933, "checked": 27703, "skipped_dead": 14386}
